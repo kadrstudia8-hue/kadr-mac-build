@@ -1,0 +1,85 @@
+# Builds the owner's personal Mac app from a private repository. Nothing of the program is published here:
+# the source is fetched with a read-only key (secret), logs show only short summaries, and the result is an
+# AES-256 encrypted disk image (password in a secret) — macOS asks for the password when it is opened.
+name: mac
+on:
+  workflow_dispatch:
+jobs:
+  dmg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kadrstudia8-hue/kadr-studio
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          path: src
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Packages
+        run: python -m pip install -q -r requirements.txt websocket-client dmgbuild > "$RUNNER_TEMP/pip.log" 2>&1 || (tail -5 "$RUNNER_TEMP/pip.log"; exit 1)
+      - uses: actions/cache@v4
+        id: ffmpeg
+        with:
+          path: src/ff
+          key: ffmpeg-lgpl-${{ matrix.arch }}-${{ hashFiles('src/tools/build_ffmpeg_mac.sh') }}
+      - name: FFmpeg
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          brew install nasm pkg-config > /dev/null 2>&1 || true
+          python -m pip install -q meson ninja
+          bash tools/build_ffmpeg_mac.sh ff > "$RUNNER_TEMP/ff.log" 2>&1 || (tail -20 "$RUNNER_TEMP/ff.log"; exit 1)
+      - name: FFmpeg check
+        run: |
+          python tools/ffmpeg_lgpl.py check ff > /dev/null
+          echo "$PWD/ff" >> "$GITHUB_PATH"
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          for t in test_cloudkey_edition test_provider_hidden test_remote_gpu test_mac test_updates; do
+            python -m unittest discover -s tests -p "$t.py" > "$RUNNER_TEMP/$t.log" 2>&1 && echo "$t ok" || { echo "$t FAILED"; grep -E "^(FAIL|ERROR):" "$RUNNER_TEMP/$t.log" | head -20; exit 1; }
+          done
+      - name: Build
+        env:
+          KADR_EDITION: clore_direct
+          KADR_FFMPEG_DIR: ${{ github.workspace }}/src/ff
+          KADR_ARCH: ${{ matrix.arch }}
+          PYTHON: python
+        run: ./build_mac_cloudkey.sh > "$RUNNER_TEMP/build.log" 2>&1 || (grep -iE "error|failed" "$RUNNER_TEMP/build.log" | tail -15; exit 1)
+      - name: Selftest
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          hdiutil attach outputs/KADR-Studio-CloudKey-*.dmg -nobrowse -mountpoint /tmp/ck > /dev/null
+          APP="/tmp/ck/KADR Studio Cloud Key.app"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist" | grep -qx studio.kadr.cloudkey
+          "$APP/Contents/MacOS/KADR-Studio-CloudKey" --selftest "$RUNNER_TEMP/selftest.json" > /dev/null 2>&1; code=$?
+          hdiutil detach /tmp/ck > /dev/null || true
+          echo "selftest exit $code"; exit $code
+      - name: Encrypt
+        env:
+          PW: ${{ secrets.DMG_PASSWORD }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack" && mv outputs/KADR-Studio-CloudKey-*.dmg "$RUNNER_TEMP/pack/"
+          printf '%s' "$PW" | hdiutil create -quiet -encryption AES-256 -stdinpass -fs HFS+ -format UDZO \
+            -volname "KADR Cloud Key" -srcfolder "$RUNNER_TEMP/pack" "$RUNNER_TEMP/KADR-CloudKey-${{ matrix.arch }}.dmg"
+          rm -rf "$RUNNER_TEMP/pack"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KADR-CloudKey-${{ matrix.arch }}
+          path: ${{ runner.temp }}/KADR-CloudKey-${{ matrix.arch }}.dmg
+          retention-days: 30
