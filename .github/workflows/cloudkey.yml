@@ -70,7 +70,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"; echo "plist $?"
           "$APP/Contents/MacOS/KADR-Studio-CloudKey" --selftest "$RUNNER_TEMP/selftest.json" > "$RUNNER_TEMP/selftest.log" 2>&1; code=$?
           echo "selftest exit $code"
-          python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print({k:(v if isinstance(v,(bool,int,float)) or v is None else str(v)[:120]) for k,v in (d.items() if isinstance(d,dict) else [])})" "$RUNNER_TEMP/selftest.json" 2>&1 | head -40
+          python3 -c "import json,sys;d=json.load(open(sys.argv[1]));[print(('ok ' if c.get('ok') else 'FAIL ')+str(c.get('name'))+': '+str(c.get('detail'))[:300]) for c in d.get('checks',[])]" "$RUNNER_TEMP/selftest.json" 2>&1 | head -40
           [ $code -ne 0 ] && grep -E "Error|error|No module|Library not loaded|Symbol not found" "$RUNNER_TEMP/selftest.log" | grep -v '  File "' | tail -8
           hdiutil detach /tmp/ck > /dev/null
           exit $code
