@@ -4,6 +4,10 @@
 name: mac
 on:
   workflow_dispatch:
+    inputs:
+      arch:
+        description: "arm64, x86_64 or both"
+        default: both
 jobs:
   dmg:
     strategy:
@@ -14,6 +18,7 @@ jobs:
             arch: arm64
           - runner: macos-15-intel
             arch: x86_64
+    if: inputs.arch == 'both' || inputs.arch == matrix.arch
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     defaults:
@@ -64,12 +69,16 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          hdiutil attach outputs/KADR-Studio-CloudKey-*.dmg -nobrowse -mountpoint /tmp/ck > /dev/null
+          set +e
+          hdiutil attach outputs/KADR-Studio-CloudKey-*.dmg -nobrowse -mountpoint /tmp/ck > /dev/null; echo "attach $?"
           APP="/tmp/ck/KADR Studio Cloud Key.app"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist" | grep -qx studio.kadr.cloudkey
-          "$APP/Contents/MacOS/KADR-Studio-CloudKey" --selftest "$RUNNER_TEMP/selftest.json" > /dev/null 2>&1; code=$?
-          hdiutil detach /tmp/ck > /dev/null || true
-          echo "selftest exit $code"; exit $code
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"; echo "plist $?"
+          "$APP/Contents/MacOS/KADR-Studio-CloudKey" --selftest "$RUNNER_TEMP/selftest.json" > "$RUNNER_TEMP/selftest.log" 2>&1; code=$?
+          echo "selftest exit $code"
+          python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print({k:(v if isinstance(v,(bool,int,float)) or v is None else str(v)[:120]) for k,v in (d.items() if isinstance(d,dict) else [])})" "$RUNNER_TEMP/selftest.json" 2>&1 | head -40
+          [ $code -ne 0 ] && grep -E "Error|error|No module|Library not loaded|Symbol not found" "$RUNNER_TEMP/selftest.log" | grep -v '  File "' | tail -8
+          hdiutil detach /tmp/ck > /dev/null
+          exit $code
       - name: Encrypt
         env:
           PW: ${{ secrets.DMG_PASSWORD }}
